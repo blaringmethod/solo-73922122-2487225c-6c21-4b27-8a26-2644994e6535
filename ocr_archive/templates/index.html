@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}报刊校订 · 稿件目录{% endblock %}
+{% block body %}
+<h1>报刊 OCR 校订档案</h1>
+<p class="lead">按阅读顺序导入识别框，用码点区间校订正文，并随时从正文找回扫描原框。</p>
+
+<section class="panel">
+  <h2>稿件</h2>
+  {% if manuscripts %}
+  <table class="grid">
+    <thead><tr><th>稿号</th><th>标题</th><th>现行版</th><th>校次</th><th>正文（截断）</th></tr></thead>
+    <tbody>
+    {% for m in manuscripts %}
+      <tr>
+        <td><a href="{{ url_for('manuscript_page', code=m['code']) }}">{{ m['code'] }}</a></td>
+        <td>{{ m['title'] }}</td>
+        <td>第 {{ m['current_release_no'] }} 版</td>
+        <td>{{ m['release_count'] }}</td>
+        <td class="mono">{{ (m['current_body'] or '')[:40] }}{% if (m['current_body'] or '')|length > 40 %}…{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">尚无稿件。导入识别框开始第一份稿。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>导入识别框</h2>
+  <p class="muted">JSON 数组按阅读顺序排列。每个框：<code>page_no</code>（页号）、<code>box_no</code>（框号）、
+    <code>rect: [x, y, w, h]</code> 或 <code>x/y/w/h</code>、<code>text</code>。
+    也可用 <code>page</code>/<code>box</code> 作为简写。</p>
+  <form method="post" action="{{ url_for('import_page') }}" enctype="multipart/form-data" class="stack">
+    <label>稿号 <input name="code" required placeholder="如 JP-1935-0412"></label>
+    <label>标题 <input name="title" required placeholder="如 申报·本埠新闻"></label>
+    <label>识别框 JSON
+      <textarea name="boxes" rows="14" class="mono" placeholder='[
+  {"page_no": 1, "box_no": 1, "rect": [40, 60, 300, 48], "text": "第一行文字"},
+  {"page_no": 1, "box_no": 2, "rect": [40, 120, 300, 48], "text": "第二行文字"}
+]'></textarea>
+    </label>
+    <label>或上传 JSON 文件 <input type="file" name="file" accept=".json,application/json"></label>
+    <button type="submit">导入并生成初稿</button>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} · 出错了{% endblock %}
+{% block body %}
+<nav class="crumbs"><a href="{{ url_for('index') }}">稿件目录</a></nav>
+<h1>{{ code }} {{ name }}</h1>
+<div class="alert error">{{ message }}</div>
+<p class="muted">没有数据被写入。返回目录后可以重试。</p>
+<p><a href="{{ url_for('index') }}">返回稿件目录</a></p>
+{% endblock %}

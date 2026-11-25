@@ -1,0 +1,24 @@
+services:
+  web:
+    build: .
+    image: ocr-archive:local
+    ports:
+      - "8000:8000"
+    environment:
+      OCR_DATABASE: /data/archive.sqlite3
+    volumes:
+      - archive-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  archive-data:

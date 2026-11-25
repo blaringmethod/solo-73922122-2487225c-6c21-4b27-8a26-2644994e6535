@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}导入失败{% endblock %}
+{% block body %}
+<nav class="crumbs"><a href="{{ url_for('index') }}">稿件目录</a></nav>
+<h1>导入失败</h1>
+<div class="alert error">{{ error }}</div>
+<p class="muted">本次导入未写入任何数据。可返回修改后重试。</p>
+<pre class="mono raw">{{ raw }}</pre>
+<p><a href="{{ url_for('index') }}">返回稿件目录</a></p>
+{% endblock %}

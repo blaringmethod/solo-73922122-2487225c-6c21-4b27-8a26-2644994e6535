@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}{{ manuscript.code }} · 第 {{ release.release_no }} 版{% endblock %}
+{% block body %}
+<nav class="crumbs"><a href="{{ url_for('index') }}">稿件目录</a> / <span>{{ manuscript.code }}</span></nav>
+
+<header class="doc-head">
+  <div>
+    <h1>{{ manuscript.title }}</h1>
+    <p class="muted">稿号 <code>{{ manuscript.code }}</code> · 正在查看第 {{ release.release_no }} 版
+      {% if release.id != current.id %}<span class="badge">历史版</span>{% else %}<span class="badge ok">现行版</span>{% endif %}
+      · 正文 {{ release.body|length }} 个码点</p>
+    {% if release.note %}<p class="note">{{ release.note }}</p>{% endif %}
+  </div>
+</header>
+
+{% if lookup_error %}<div class="alert error">{{ lookup_error }}</div>{% endif %}
+
+<section class="panel">
+  <h2>正文</h2>
+  <p class="muted">每个色块是一段同源正文。浅色悬停可见来源；选一段非空正文即可替换或删除。</p>
+  <div id="body" class="body-text" data-release-no="{{ release.release_no }}" data-release-id="{{ release.id }}">{{ markup|safe }}</div>
+  <p class="selection-line">当前选择：<span id="selection-label" class="mono">未选择</span>
+    <button type="button" id="clear-selection" class="link">清除</button></p>
+</section>
+
+<section class="panel">
+  <h2>校订</h2>
+  {% if release.id == current.id %}
+  <form method="post" action="{{ url_for('revise_page', code=manuscript.code) }}" class="stack" id="revise-form">
+    <input type="hidden" name="base_release_id" value="{{ release.id }}">
+    <div class="two-col">
+      <label>起点（码点，含）<input name="start" id="start" type="number" min="0" required></label>
+      <label>终点（码点，不含）<input name="end" id="end" type="number" min="1" required></label>
+    </div>
+    <label>换入文字（留空即删除）
+      <textarea name="replacement" id="replacement" rows="4" class="mono"></textarea>
+    </label>
+    <label>校订说明 <input name="note" placeholder="如：据原报影印改「己」为「已」"></label>
+    <button type="submit">提交校订，生成新版</button>
+  </form>
+  {% else %}
+  <p class="muted">这是第 {{ release.release_no }} 版的历史快照，不能在此版上校订。
+    请切换到 <a href="{{ url_for('manuscript_page', code=manuscript.code) }}">现行版（第 {{ current.release_no }} 版）</a>。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>查源</h2>
+  <p class="muted">给出正文区间（码点，0 起、含起点不含终点），列出页号、框号、原框坐标与框内区间。
+    {% if release.id != current.id %}可查历史版：本页当前为第 {{ release.release_no }} 版。{% endif %}</p>
+  <form method="get" action="{{ url_for('manuscript_page', code=manuscript.code) }}" class="stack">
+    <input type="hidden" name="release" value="{{ release.release_no }}">
+    <div class="three-col">
+      <label>起点（含）<input name="lookup_start" type="number" min="0" value="{{ lookup_start if lookup_start is not none else '' }}"></label>
+      <label>终点（不含）<input name="lookup_end" type="number" min="1" value="{{ lookup_end if lookup_end is not none else '' }}"></label>
+      <label>只看页号（可选）<input name="page" type="number" min="1" value="{{ page_filter if page_filter else '' }}"></label>
+    </div>
+    <div class="row">
+      <button type="submit">查源</button>
+      <button type="button" id="lookup-selection" class="secondary">用当前选择查源</button>
+    </div>
+  </form>
+
+  {% if lookup is not none %}
+  <h3>第 {{ lookup_target.release_no }} 版 [{{ lookup_start }}, {{ lookup_end }}) 的来源
+    <span class="muted mono">「{{ lookup_target.body[lookup_start:lookup_end] }}」</span></h3>
+  {% if lookup %}
+  <table class="grid">
+    <thead><tr><th>页号</th><th>框号</th><th>原框坐标 x, y, w, h</th><th>框内区间（码点，半开）</th><th>对应正文区间</th><th>框内原文</th></tr></thead>
+    <tbody>
+    {% for s in lookup %}
+      <tr>
+        <td>{{ s.page_no }}</td>
+        <td>{{ s.box_no }}</td>
+        <td class="mono">{{ s.rect.x }}, {{ s.rect.y }}, {{ s.rect.w }}, {{ s.rect.h }}</td>
+        <td class="mono">{% for a, b in s.intervals %}[{{ a }}, {{ b }}) {% endfor %}
+          {% if not s.exact %}<span class="muted">（换入字，继承整框区间）</span>{% endif %}</td>
+        <td class="mono">{% for a, b in s.body_ranges %}[{{ a }}, {{ b }}) {% endfor %}</td>
+        <td class="mono">{{ s.box_text }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">该区间没有可列出的来源（可能全部是未落在识别框内的新内容）。</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>校次</h2>
+  <ol class="releases">
+  {% for r in releases %}
+    <li>
+      <a href="{{ url_for('manuscript_page', code=manuscript.code, release=r.release_no) }}">第 {{ r.release_no }} 版</a>
+      {% if r.id == current.id %}<span class="badge ok">现行</span>{% endif %}
+      <span class="muted">{{ r.created_at }}</span>
+      {% if r.note %}<span class="note">{{ r.note }}</span>{% endif %}
+      <div class="mono preview">{{ r.body[:60] }}{% if r.body|length > 60 %}…{% endif %}</div>
+    </li>
+  {% endfor %}
+  </ol>
+</section>
+
+<section class="panel">
+  <h2>识别框</h2>
+  <details>
+    <summary>展开 {{ boxes|length }} 个框</summary>
+    <table class="grid">
+      <thead><tr><th>页号</th><th>框号</th><th>坐标 x, y, w, h</th><th>文字</th></tr></thead>
+      <tbody>
+      {% for b in boxes %}
+        <tr><td>{{ b['page_no'] }}</td><td>{{ b['box_no'] }}</td>
+          <td class="mono">{{ b['x'] }}, {{ b['y'] }}, {{ b['w'] }}, {{ b['h'] }}</td>
+          <td class="mono">{{ b['text'] }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+</section>
+{% endblock %}
