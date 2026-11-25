@@ -8,6 +8,7 @@ from typing import Any
 
 from flask import (
     Flask,
+    Response,
     abort,
     jsonify,
     redirect,
@@ -17,7 +18,7 @@ from flask import (
 )
 from werkzeug.exceptions import HTTPException
 
-from . import archive
+from . import archive, tablefill
 from .archive import (
     ArchiveError,
     NotFoundError,
@@ -170,6 +171,10 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             lookup_start=lookup_start,
             lookup_end=lookup_end,
             page_filter=page_filter,
+            fill=tablefill.get_fill_for_release(conn, release.id),
+            fill_by_release={
+                f["release_id"]: f for f in tablefill.list_fills(conn, manuscript.id)
+            },
         )
 
     @app.get("/m/<code>/r/<int:release_no>")
@@ -228,6 +233,108 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     def lookup_page(code: str):
         args = {k: v for k, v in request.args.items()}
         return redirect(url_for("manuscript_page", code=code, **args), code=303)
+
+    # ---------- 统计表补字（HTML 表单） ----------
+
+    @app.post("/m/<code>/table-fill")
+    def table_fill_page(code: str):
+        conn = archive.get_db()
+        try:
+            manuscript = archive.get_manuscript(conn, code)
+        except NotFoundError:
+            abort(404)
+        form = request.form
+        current = archive.get_release_by_id(conn, manuscript.current_release_id)
+        try:
+            base_id = _required_int(form, "base_release_id", "依据版本")
+            rows = _required_int(form, "rows", "行数")
+            cols = _required_int(form, "cols", "列数")
+            spec = tablefill.build_spec(
+                rows,
+                cols,
+                _parse_cell_intervals(form, "cells"),
+                _parse_total_list(form, "row_total", rows, "行合计"),
+                _parse_total_list(form, "col_total", cols, "列合计"),
+                current.body,
+            )
+            result = tablefill.solve(current.body, spec)
+        except ArchiveError as exc:
+            return _render_manuscript_error(
+                conn, manuscript, current, f"补字失败：{exc}", 400
+            )
+
+        if result.status != "unique":
+            # 无解或多解：按要求不发版，把结论与（至多两组）填法交回页面复核。
+            return _render_fill_outcome(
+                conn,
+                manuscript,
+                current,
+                spec,
+                result,
+                status=200,
+            )
+
+        try:
+            updated, filled = tablefill.fill_table(
+                conn, manuscript, base_id, spec, form.get("note", "")
+            )
+        except StaleReleaseError as exc:
+            fresh = archive.get_release_by_id(
+                conn, archive.get_manuscript(conn, code).current_release_id
+            )
+            return _render_manuscript_error(
+                conn,
+                manuscript,
+                fresh,
+                f"补字失败：{exc}。现行版为第 {exc.current_release_no} 版，请刷新后基于现行版重做。",
+                409,
+            )
+        except ArchiveError as exc:
+            return _render_manuscript_error(
+                conn, manuscript, current, f"补字失败：{exc}", 400
+            )
+        return redirect(
+            url_for(
+                "manuscript_page",
+                code=code,
+                release=updated.release_no,
+            ),
+            code=303,
+        )
+
+    @app.get("/m/<code>/r/<int:release_no>/table.csv")
+    def table_fill_csv_page(code: str, release_no: int):
+        return _csv_response(code, release_no)
+
+    @app.get("/m/<code>/table.csv")
+    def table_fill_csv_current(code: str):
+        conn = archive.get_db()
+        try:
+            manuscript = archive.get_manuscript(conn, code)
+        except NotFoundError:
+            abort(404)
+        release = archive.get_release_by_id(conn, manuscript.current_release_id)
+        return _csv_response(code, release.release_no)
+
+    def _csv_response(code: str, release_no: int):
+        conn = archive.get_db()
+        try:
+            manuscript = archive.get_manuscript(conn, code)
+            release = archive.get_release(conn, manuscript.id, release_no)
+        except NotFoundError:
+            abort(404)
+        fill = tablefill.get_fill_for_release(conn, release.id)
+        if fill is None:
+            abort(404)
+        csv_text = tablefill.fill_csv(fill)
+        filename = f"{code}-r{release_no}.csv"
+        return Response(
+            csv_text,
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
 
     @app.get("/healthz")
     def healthz():
@@ -309,6 +416,79 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             ),
         )
 
+    @app.post("/api/m/<code>/table-fill")
+    def api_table_fill(code: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _api_error("请求体必须是 JSON 对象", 400)
+        conn = archive.get_db()
+        try:
+            manuscript = archive.get_manuscript(conn, code)
+            current = archive.get_release_by_id(conn, manuscript.current_release_id)
+            base_id = _payload_int(payload, "base_release_id", "依据版本")
+            spec = tablefill.build_spec(
+                payload.get("rows"),
+                payload.get("cols"),
+                payload.get("cells"),
+                payload.get("row_totals"),
+                payload.get("col_totals"),
+                current.body,
+            )
+            result = tablefill.solve(current.body, spec)
+        except NotFoundError as exc:
+            return _api_error(str(exc), 404)
+        except ArchiveError as exc:
+            return _api_error(str(exc), 400)
+
+        if result.status != "unique":
+            return jsonify(
+                ok=True,
+                status=result.status,
+                published=False,
+                question_positions=[
+                    {"row": r, "col": c} for r, c in result.question_positions
+                ],
+                solutions=[
+                    {"cells": [list(row) for row in solution]}
+                    for solution in result.solutions
+                ],
+            )
+
+        try:
+            updated, filled = tablefill.fill_table(
+                conn, manuscript, base_id, spec, str(payload.get("note", ""))
+            )
+        except StaleReleaseError as exc:
+            return jsonify(
+                ok=False,
+                error=str(exc),
+                code="stale_release",
+                current_release_no=exc.current_release_no,
+            ), 409
+        except NotFoundError as exc:
+            return _api_error(str(exc), 404)
+        except ArchiveError as exc:
+            return _api_error(str(exc), 400)
+        fill = tablefill.get_fill_for_release(conn, updated.id)
+        return jsonify(
+            ok=True,
+            status="unique",
+            published=True,
+            release_no=updated.release_no,
+            release_id=updated.id,
+            body=updated.body,
+            filled=[list(row) for row in filled],
+            csv_url=url_for(
+                "table_fill_csv_page",
+                code=code,
+                release_no=updated.release_no,
+            ),
+            table_fill=_fill_json(fill),
+            url=url_for(
+                "manuscript_page", code=code, release=updated.release_no
+            ),
+        )
+
     @app.get("/api/m/<code>/releases")
     def api_releases(code: str):
         conn = archive.get_db()
@@ -317,6 +497,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         except NotFoundError as exc:
             return _api_error(str(exc), 404)
         releases = archive.list_releases(conn, manuscript.id)
+        fills = {f["release_id"]: f for f in tablefill.list_fills(conn, manuscript.id)}
         return jsonify(
             ok=True,
             current_release_no=next(
@@ -332,6 +513,18 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
                     "note": r.note,
                     "body": r.body,
                     "created_at": r.created_at,
+                    "table_fill": (
+                        {
+                            **_fill_json(fills[r.id]),
+                            "csv_url": url_for(
+                                "table_fill_csv_page",
+                                code=code,
+                                release_no=r.release_no,
+                            ),
+                        }
+                        if r.id in fills
+                        else None
+                    ),
                 }
                 for r in releases
             ],
@@ -441,6 +634,79 @@ def _api_error(message: str, status: int):
     return jsonify(ok=False, error=message), status
 
 
+def _parse_cell_intervals(form, field: str) -> list:
+    """The HTML form posts the 2-D interval array as one JSON textarea."""
+    raw = form.get(field, "")
+    if not raw.strip():
+        raise ValidationError("缺少数据格码点区间")
+    try:
+        cells = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"数据格区间 JSON 解析失败：{exc}") from exc
+    return cells
+
+
+def _parse_total_list(form, field: str, expected: int, label: str) -> list[int]:
+    raw = form.get(field, "")
+    parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
+    if len(parts) != expected:
+        raise ValidationError(f"{label}必须是 {expected} 个逗号分隔的整数")
+    totals: list[int] = []
+    for part in parts:
+        try:
+            totals.append(int(part))
+        except ValueError as exc:
+            raise ValidationError(f"{label}必须是整数") from exc
+    return totals
+
+
+def _fill_json(fill: dict | None) -> dict | None:
+    if fill is None:
+        return None
+    return {
+        "rows": fill["rows"],
+        "cols": fill["cols"],
+        "cells": fill["cells"],
+        "row_totals": fill["row_totals"],
+        "col_totals": fill["col_totals"],
+        "filled": fill["filled"],
+        "question_count": fill["question_count"],
+    }
+
+
+def _render_fill_outcome(conn, manuscript, release, spec, result, status: int):
+    """No-solution / multi-solution answers stay on the page and never publish."""
+    return (
+        render_template(
+            "manuscript.html",
+            manuscript=manuscript,
+            release=release,
+            current=release,
+            releases=archive.list_releases(conn, manuscript.id),
+            markup=archive.body_markup(conn, release),
+            boxes=_box_rows(conn, manuscript.id),
+            highlight=None,
+            lookup=None,
+            lookup_error=None,
+            lookup_target=None,
+            lookup_start=None,
+            lookup_end=None,
+            page_filter=None,
+            fill=tablefill.get_fill_for_release(conn, release.id),
+            fill_by_release={
+                f["release_id"]: f for f in tablefill.list_fills(conn, manuscript.id)
+            },
+            fill_outcome={
+                "status": result.status,
+                "spec": spec,
+                "question_positions": result.question_positions,
+                "solutions": result.solutions,
+            },
+        ),
+        status,
+    )
+
+
 def _fresh_current(conn, code: str):
     manuscript = archive.get_manuscript(conn, code)
     release = archive.get_release_by_id(conn, manuscript.current_release_id)
@@ -464,6 +730,10 @@ def _render_manuscript_error(conn, manuscript, release, message: str, status: in
             lookup_start=None,
             lookup_end=None,
             page_filter=None,
+            fill=tablefill.get_fill_for_release(conn, release.id),
+            fill_by_release={
+                f["release_id"]: f for f in tablefill.list_fills(conn, manuscript.id)
+            },
         ),
         status,
     )

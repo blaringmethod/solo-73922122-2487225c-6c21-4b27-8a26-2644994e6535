@@ -81,3 +81,23 @@ CREATE INDEX IF NOT EXISTS idx_span_release ON body_span(release_id, body_start)
 CREATE INDEX IF NOT EXISTS idx_span_source ON body_span(source_set_id);
 CREATE INDEX IF NOT EXISTS idx_entry_set ON source_entry(source_set_id);
 CREATE INDEX IF NOT EXISTS idx_release_manuscript ON release(manuscript_id, release_no);
+
+-- A statistics-table fill ("补字"): one row per release produced by a unique
+-- solution. No-solution and multi-solution answers never publish, so they have
+-- no rows here. The full table specification (cell code-point intervals, row
+-- and column totals) is kept so the supplied CSV can be regenerated from any
+-- historical release without replaying edits.
+CREATE TABLE IF NOT EXISTS table_fill (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id        INTEGER NOT NULL UNIQUE REFERENCES release(id) ON DELETE CASCADE,
+    manuscript_id     INTEGER NOT NULL REFERENCES manuscript(id) ON DELETE CASCADE,
+    row_count         INTEGER NOT NULL,
+    col_count         INTEGER NOT NULL,
+    cells_json        TEXT    NOT NULL,   -- row-major [[[start,end], ...], ...]
+    row_totals_json   TEXT    NOT NULL,   -- 行合计，按行顺序
+    col_totals_json   TEXT    NOT NULL,   -- 列合计，按列顺序
+    filled_values_json TEXT   NOT NULL,   -- 补出的完整数据格（行列顺序）
+    question_count    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_table_fill_manuscript ON table_fill(manuscript_id);

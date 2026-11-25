@@ -45,6 +45,89 @@
 </section>
 
 <section class="panel">
+  <h2>统计表补字</h2>
+  <p class="muted">录入 2～4 行、2～4 列数据格的正文码点区间（半开、互不重叠）与纸面行列合计。
+    每格只含 0～9 与半角问号（每格至多一个、全表 1～6 个）。仅当行列合计给出唯一解时才补齐问号、
+    生成新版并随版保存供数 CSV；无解或多解都不发版。核算期间仍可在上方继续普通校订。</p>
+
+  {% if fill_outcome is defined and fill_outcome %}
+  <div class="alert {{ 'error' if fill_outcome.status == 'none' else '' }} fill-outcome">
+    {% if fill_outcome.status == 'none' %}
+      <strong>无解：</strong>行列合计无法同时满足，本次补字与 CSV 均未发版。请核对纸面合计或区间录入。
+    {% else %}
+      <strong>多解：</strong>存在多组填法，下列两组供复核；本次补字与 CSV 均未发版。
+    {% endif %}
+  </div>
+  {% if fill_outcome.status == 'multiple' %}
+  <div class="fill-solutions">
+    {% for solution in fill_outcome.solutions %}
+    <h3>候选填法 {{ loop.index }}</h3>
+    <table class="grid fill-grid">
+      <thead><tr><th></th>{% for c in range(fill_outcome.spec.cols) %}<th>第 {{ c + 1 }} 列</th>{% endfor %}<th>行合计</th></tr></thead>
+      <tbody>
+      {% for r in range(fill_outcome.spec.rows) %}
+        <tr><th>第 {{ r + 1 }} 行</th>
+          {% for cell in solution[r] %}<td class="mono">{{ cell }}</td>{% endfor %}
+          <td class="mono">{{ fill_outcome.spec.row_totals[r] }}</td>
+        </tr>
+      {% endfor %}
+      <tr><th>列合计</th>
+        {% for total in fill_outcome.spec.col_totals %}<td class="mono">{{ total }}</td>{% endfor %}
+        <td></td>
+      </tr>
+      </tbody>
+    </table>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if fill %}
+  <div class="alert ok-badge">
+    <strong>本版含统计表补字：</strong>共补 {{ fill.question_count }} 个问号，数据格按原表行列顺序存为供数 CSV。
+    <a href="{{ url_for('table_fill_csv_page', code=manuscript.code, release_no=release.release_no) }}">下载第 {{ release.release_no }} 版 CSV</a>
+  </div>
+  <table class="grid fill-grid">
+    <thead><tr><th></th>{% for c in range(fill.cols) %}<th>第 {{ c + 1 }} 列</th>{% endfor %}<th>行合计</th></tr></thead>
+    <tbody>
+    {% for r in range(fill.rows) %}
+      <tr><th>第 {{ r + 1 }} 行</th>
+        {% for cell in fill.filled[r] %}<td class="mono">{{ cell }}</td>{% endfor %}
+        <td class="mono">{{ fill.row_totals[r] }}</td>
+      </tr>
+    {% endfor %}
+    <tr><th>列合计</th>
+      {% for total in fill.col_totals %}<td class="mono">{{ total }}</td>{% endfor %}
+      <td></td>
+    </tr>
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if release.id == current.id %}
+  <form method="post" action="{{ url_for('table_fill_page', code=manuscript.code) }}" class="stack" id="table-fill-form">
+    <input type="hidden" name="base_release_id" value="{{ release.id }}">
+    <div class="two-col">
+      <label>行数（2～4）<input name="rows" type="number" min="2" max="4" required></label>
+      <label>列数（2～4）<input name="cols" type="number" min="2" max="4" required></label>
+    </div>
+    <label>数据格码点区间（JSON 二维数组，行列顺序，半开）
+      <textarea name="cells" rows="5" class="mono" placeholder='[[[0,3],[3,5]],[[5,8],[8,10]]]'></textarea>
+    </label>
+    <div class="two-col">
+      <label>行合计（逗号分隔，按行顺序）<input name="row_total" class="mono" placeholder="如 12, 34"></label>
+      <label>列合计（逗号分隔，按列顺序）<input name="col_total" class="mono" placeholder="如 15, 31"></label>
+    </div>
+    <label>补字说明（可选）<input name="note" placeholder="如：据纸面行列合计补齐统计表问号"></label>
+    <button type="submit">试算并在唯一解时补字发版</button>
+  </form>
+  {% else %}
+  <p class="muted">这是第 {{ release.release_no }} 版的历史快照，补字只能基于
+    <a href="{{ url_for('manuscript_page', code=manuscript.code) }}">现行版（第 {{ current.release_no }} 版）</a>提交。</p>
+  {% endif %}
+</section>
+
+<section class="panel">
   <h2>查源</h2>
   <p class="muted">给出正文区间（码点，0 起、含起点不含终点），列出页号、框号、原框坐标与框内区间。
     {% if release.id != current.id %}可查历史版：本页当前为第 {{ release.release_no }} 版。{% endif %}</p>
@@ -94,6 +177,10 @@
     <li>
       <a href="{{ url_for('manuscript_page', code=manuscript.code, release=r.release_no) }}">第 {{ r.release_no }} 版</a>
       {% if r.id == current.id %}<span class="badge ok">现行</span>{% endif %}
+      {% if fill_by_release.get(r.id) %}
+      <span class="badge">统计表补字</span>
+      <a href="{{ url_for('table_fill_csv_page', code=manuscript.code, release_no=r.release_no) }}">下载 CSV</a>
+      {% endif %}
       <span class="muted">{{ r.created_at }}</span>
       {% if r.note %}<span class="note">{{ r.note }}</span>{% endif %}
       <div class="mono preview">{{ r.body[:60] }}{% if r.body|length > 60 %}…{% endif %}</div>

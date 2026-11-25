@@ -3,6 +3,10 @@
 把报刊 OCR 识别框按阅读顺序导入，拼成初稿；校订员以 Unicode 码点区间替换或删除正文；
 任何一版正文都能按区间查回扫描原框（页号、框号、矩形坐标、框内区间）。
 
+另有**统计表补字**：档案员录入 2～4 行、2～4 列数据格的码点区间与纸面行列合计，系统按
+每个问号补一位数字的约束枚举填法；只有行列合计同时满足且**唯一解**时才一次补齐全部问号、
+生成新版并随版保存供数 CSV；无解或多解（列出两组候选）都不发版。
+
 ## 快速启动（Docker Compose）
 
 ```bash
@@ -35,8 +39,16 @@ OCR_DATABASE=./archive.sqlite3 gunicorn --bind 0.0.0.0:8000 ocr_archive.wsgi:app
 脚本化复跑（对运行中的服务）：
 
 ```bash
-python3 tests/walkthrough.py http://127.0.0.1:8000
+python3 tests/walkthrough.py http://127.0.0.1:8000        # 导入 → 校订 → 查源全流程
+python3 tests/table_walkthrough.py http://127.0.0.1:8000  # 统计表补字、CSV、无解/多解/409
 ```
+
+统计表补字可直接用 `sample/table_boxes.json` 试跑：导入后在稿件页「统计表补字」面板录入
+
+- 数据格区间 `[[[9,11],[12,14]],[[15,16],[17,18]]]`
+- 行合计 `40,9`、列合计 `18,31`
+
+唯一解把 `1? 2? 4 5` 补成 `14 26 4 5`，第 2 版即可下载 CSV（`14,26` / `4,5`）。
 
 ## 关键约定
 
@@ -55,6 +67,13 @@ python3 tests/walkthrough.py http://127.0.0.1:8000
 - **发版**：正文与来源在同一 SQLite 事务内写入一个新 `release`；旧版是完整快照，读取不需要重放校订。
 - **只接受现行版**：提交必须带 `base_release_id`；若写事务开启时它已不是现行版，返回 409，
   事务回滚，`current_release_id` 与所有表都不变。
+- **统计表补字**：每格正文只允许 `0～9` 与半角 `?`，每格至多一个问号、全表 1～6 个；
+  数据格区间沿用半开写法且互不重叠。回溯枚举问号的 10 种取值（带行列上界剪枝，最多保留两组解），
+  无解与多解均不发版。唯一解在一个 `BEGIN IMMEDIATE` 事务内逐字符等长替换全部问号：
+  新数字继承对应问号所在同源段的整段来源（`exact: false`），未改文字沿用原出处、仍精确到框内区间；
+  表规格（区间、行列合计、补后数据格）随新版写入 `table_fill`，供数 CSV 可按版号重新生成。
+  提交时若所据版本已不是现行版，或事务中任何写入失败，补字与 CSV 一并回滚、均不生效。
+  核算期间普通校订不受影响，补字之后仍可继续校订。
 
 ## 数据模型
 
@@ -65,6 +84,7 @@ python3 tests/walkthrough.py http://127.0.0.1:8000
 | `release` | 不可变版本：`body` 全文、父版本、校订说明 |
 | `body_span` | 正文的极大同源段 `[body_start, body_end)` → 来源集合；`linear`/`map_start` 记录原文与框内字符的一一对应 |
 | `source_set` / `source_entry` | 跨版共享的来源集合，条目为（框, 框内区间 `[start, end)`） |
+| `table_fill` | 统计表补字随新版保存的表规格：行列数、各格码点区间、行列合计、补后数据格、问号数 |
 
 ## HTTP 接口
 
@@ -75,17 +95,22 @@ python3 tests/walkthrough.py http://127.0.0.1:8000
 | GET | `/m/<code>?release=N` | 指定版正文与校次（只读展示旧版） |
 | POST | `/m/<code>/revise` | 表单校订：`base_release_id,start,end,replacement,note` |
 | GET | `/m/<code>?lookup_start=&lookup_end=[&page=]` | 表单查源 |
+| POST | `/m/<code>/table-fill` | 表单统计表补字：`base_release_id,rows,cols,cells(JSON),row_total,col_total,note`；无解/多解回页面不发版 |
+| GET | `/m/<code>/r/<release_no>/table.csv` | 下载该版供数 CSV（数据格按原表行列顺序）；无补字记录返回 404 |
+| GET | `/m/<code>/table.csv` | 现行版的供数 CSV |
 | POST | `/api/import` | JSON：`{code,title,boxes:[...]}` |
 | POST | `/api/m/<code>/revise` | JSON：`{base_release_id,start,end,replacement,note}`；过期版返回 409 |
-| GET | `/api/m/<code>/releases` | 全部版本的正文与说明 |
+| POST | `/api/m/<code>/table-fill` | JSON：`{base_release_id,rows,cols,cells,row_totals,col_totals,note}`；唯一解发版，无解/多解回 `status` 与至多两组候选且 `published:false`，过期版 409 |
+| GET | `/api/m/<code>/releases` | 全部版本的正文与说明，含补字版的 `table_fill` 规格与 `csv_url` |
 | GET | `/api/m/<code>/lookup?start=&end=[&release=][&page=]` | JSON 查源 |
 | GET | `/healthz` | 健康检查 |
 
 ## 测试
 
 ```bash
-python3 -m unittest discover -s tests        # 41 个用例：领域逻辑、HTTP、并发过期、码点
+python3 -m unittest discover -s tests        # 70 个用例：领域逻辑、补字求解/发版、HTTP、并发过期、码点
 python3 tests/walkthrough.py http://...      # 对真实服务走表单流程
+python3 tests/table_walkthrough.py http://...# 统计表补字端到端（含 CSV 与无解/多解/409）
 python3 tests/concurrency.py http://...      # 并发提交/重复导入竞态
 node tests/selection_test.js /tmp/page.html ocr_archive/static/app.js
                                              # 浏览器选区→码点映射（需先跑 tests/render_for_js.py）
